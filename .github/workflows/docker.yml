@@ -1,0 +1,107 @@
+name: Build and publish PHP
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.arch.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: amd64
+            runner: ubuntu-24.04
+          - name: arm64
+            runner: ubuntu-24.04-arm
+        variant: &variants [cli, fpm]
+        php: &php
+          - series: '7.4'
+            distro: debian
+            directory: 7.4/bullseye
+          - series: '7.4'
+            distro: alpine
+            directory: 7.4/alpine3.16
+          - series: '8.0'
+            distro: debian
+            directory: 8.0/bullseye
+          - series: '8.0'
+            distro: alpine
+            directory: 8.0/alpine3.16
+          - series: '8.1'
+            distro: debian
+            directory: 8.1/bookworm
+          - series: '8.1'
+            distro: alpine
+            directory: 8.1/alpine3.22
+    name: PHP ${{ matrix.php.series }} ${{ matrix.variant }} ${{ matrix.php.distro }} ${{ matrix.arch.name }}
+    env:
+      IMAGE: ghcr.io/effectivesloth/patched-php
+      TAG: ${{ matrix.php.series }}-${{ matrix.variant }}-${{ matrix.php.distro }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.php.directory }}/${{ matrix.variant }}
+          pull: true
+          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+          platforms: linux/${{ matrix.arch.name }}
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}-${{ matrix.arch.name }}-${{ github.sha }}
+          build-args: SOURCE_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ env.TAG }}-${{ matrix.arch.name }}
+          cache-to: type=gha,mode=max,scope=${{ env.TAG }}-${{ matrix.arch.name }}
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: *variants
+        php: *php
+    name: Publish PHP ${{ matrix.php.series }} ${{ matrix.variant }} ${{ matrix.php.distro }}
+    env:
+      IMAGE: ghcr.io/effectivesloth/patched-php
+      TAG: ${{ matrix.php.series }}-${{ matrix.variant }}-${{ matrix.php.distro }}
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish multi-platform tags
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:$TAG" \
+            --tag "$IMAGE:$TAG-$GITHUB_SHA" \
+            "$IMAGE:$TAG-amd64-$GITHUB_SHA" \
+            "$IMAGE:$TAG-arm64-$GITHUB_SHA"
